@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+
+# Secrets — never commit real credentials
+.env
+.env.local
+*.pem
+*.key
+
+# Organizer PDFs (reference only; not needed to build or run)
+*.pdf
+
+# Runtime / debug logs
+*.log
+nohup.out
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
