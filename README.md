@@ -63,7 +63,7 @@ runtime, database, or build tool is needed.
 
 ```bash
 git clone https://github.com/A7reus/bup-cse-fest-2026-hackathon-preli
-cd bup-cse-fest-hackathon-2026-hackathon-preli
+cd bup-cse-fest-2026-hackathon-preli
 npm ci
 cp .env.example .env   # put your GROQ_API_KEY inside (optional — see below)
 npm start              # listens on 0.0.0.0:8080
