@@ -3,7 +3,7 @@ services:
     name: gridwise-llm
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /health
     envVars:
@@ -17,3 +17,5 @@ services:
         value: gemini-3.1-flash-lite
       - key: LLM_TIMEOUT_MS
         value: '20000'
+      - key: LLM_DEADLINE_MS
+        value: '25000'

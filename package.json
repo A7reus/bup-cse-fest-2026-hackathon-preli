@@ -8,6 +8,7 @@
     "dev": "node src/app.js",
     "test": "node test/run-samples.js",
     "test:public": "node test/run-samples.js",
+    "test:faults": "node test/fault-injection.js",
     "test:offline": "GRIDWISE_FORCE_FALLBACK=1 node test/run-samples.js"
   },
   "dependencies": {

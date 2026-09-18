@@ -10,13 +10,13 @@ One HTTP service that: **understands operator notes with an LLM → validates wi
 operator_notes ──▶ Groq gpt-oss-20b ──▶ Gemini 3.1 Flash Lite ──▶ LP optimizer ──▶ replay self-check ──▶ response
    tier chain: first     (primary)          (fallback: own          (javascript-lp-solver   (energy balance,
    guardrailed success wins                 15 RPM/500 RPD quota)   simplex, true optimum)  battery, directives)
-   + one repair round-trip on tier 1 │ timeout │ invalid JSON │ every tier fails │
+   + one repair round-trip on tier 1 │ timeout │ deadline │ invalid JSON │ every tier fails │
                                      └─────────▶ rule-based BACKUP parser ────────┘
 ```
 
-- **LLM role (mandatory, Problem Statement §02/§08):** `src/llm.js` converts each of the 1–3 notes into exactly one `{note_index, applies, directive_type, structured_adjustment, explanation}` entry in order. Tiers are tried in order — **Groq `gpt-oss-20b` → Gemini 3.1 Flash Lite** (separate quotas per provider/model) — and the first guardrailed success wins, with one repair round-trip on tier 1. LLM output is **untrusted** until `src/guardrails.js` passes. Set `GRIDWISE_LLM_CHAIN` to a single tier (e.g. `gemini-lite`) for isolated per-model testing.
+- **LLM role (mandatory, Problem Statement §02/§08):** `src/llm.js` converts each of the 1–3 notes into exactly one `{note_index, applies, directive_type, structured_adjustment, explanation}` entry in order. Tiers are tried in order — **Groq `gpt-oss-20b` → Gemini 3.1 Flash Lite** (separate quotas per provider/model) — and the first guardrailed success wins, with one repair round-trip on tier 1. A 25 s overall deadline (`LLM_DEADLINE_MS`) skips remaining tiers for backup so requests never breach the judge's 30 s limit. LLM output is **untrusted** until `src/guardrails.js` passes. Set `GRIDWISE_LLM_CHAIN` to a single tier (e.g. `gemini-lite`) for isolated per-model testing.
 - **Guardrails:** allowed types only; `no_op ⇔ applies=false + null`; hours unique ints 0–23 ascending (numeric strings coerced); `solar factor 0..1` (a `20`-style percentage is repaired to `0.2`); reserve `0..capacity` (a leaked `0.5` fraction is scaled by capacity); grid cap `≥0`; start-inclusive/end-exclusive windows (`1 PM–3 PM → [13,14]`, `for the 14:00 hour → [14]`); factor = usable fraction remaining (`80% reduction → 0.2`, `no solar at all → 0.0`).
-- **Backup (reliability, NOT sole interpreter):** `src/fallback.js` regex/time/percentage parser runs **only** when the LLM times out, errors, or fails guardrails. The LLM is always attempted first (see logs `llm+backup`); this keeps valid-request stability and avoids crashes (Guide §05/§08).
+- **Backup (reliability, NOT sole interpreter):** `src/fallback.js` regex/time/percentage parser runs **only** when every LLM tier times out, errors, exhausts the deadline, or fails guardrails. The LLM chain is always attempted first (per-tier `[llm]` / `[llm:…]` log tags, `[backup]` when it serves); this keeps valid-request stability and avoids crashes (Guide §05/§08).
 - **Optimizer (Optimization Quality 10 pts):** `src/optimizer.js` formulates a true linear program (minimize `Σ grid×tariff` s.t. balance, battery transitions/bounds/rates, effective solar, no-charge/discharge, reserve, grid caps, `E23 = E0`) and solves with `javascript-lp-solver` simplex — the Node equivalent of the requested PuLP+CBC optimum. Grid is recomputed from exact balance; simultaneous charge+discharge is netted; totals are rounded to 2 decimals (judge tolerance 0.01).
 - **Validator:** `src/validator.js` enforces request schema (400 malformed / 422 infeasible) and replays the plan exactly like the hidden judge.
 
@@ -44,7 +44,8 @@ operator_notes ──▶ Groq gpt-oss-20b ──▶ Gemini 3.1 Flash Lite ──
 │   ├── optimizer.js    # True LP optimum (javascript-lp-solver simplex, PuLP+CBC-equivalent)
 │   └── validator.js    # Request schema checks + judge-style replay + totals recomputation
 ├── test/
-│   └── run-samples.js  # Replays all 10 public samples (interpretation + replay + totals)
+│   ├── run-samples.js  # Replays all 10 public samples (interpretation + replay + totals)
+│   └── fault-injection.js  # Dead keys/endpoints, malformed input, guardrail repairs (npm run test:faults)
 ├── Dockerfile          # node:20-alpine fallback image, exposes 8080, no baked secrets
 ├── render.yaml         # Render free web service (build/start, /health check, env names)
 ├── package.json        # express, javascript-lp-solver, dotenv; npm start/test
@@ -81,6 +82,7 @@ Public-sample test (boots the API in-process; works **without** a Groq key via b
 ```bash
 npm test              # full chain: Groq -> Gemini Lite -> guardrails (+repair) -> LP -> replay
 npm run test:offline  # quota-free: GRIDWISE_FORCE_FALLBACK=1 bypasses all LLM tiers
+npm run test:faults   # fault injection: dead keys/endpoints, malformed input, guardrail repairs
 # isolated per-model runs (each must pass 10/10 on its own):
 GRIDWISE_LLM_CHAIN=groq npm test
 GRIDWISE_LLM_CHAIN=gemini-lite npm test
@@ -109,9 +111,11 @@ Submit the exact tag/digest + `docker run` command. Image contains no secrets (`
 | `GROQ_MODEL` | no (default `openai/gpt-oss-20b`) | Override if Groq retires it; any JSON-capable chat model works |
 | `GEMINI_MODEL` | no (default `gemini-3.1-flash-lite`) | 15 RPM / 250K TPM / 500 RPD tier; avoid 20-RPD Flash models for judging |
 | `GRIDWISE_LLM_CHAIN` | no (default `groq,gemini-lite`) | Tier order; single name isolates one tier for testing |
-| `LLM_TIMEOUT_MS` | no (default `20000`) | Must keep total `/optimize-energy` < 30000 ms |
+| `LLM_TIMEOUT_MS` | no (default `20000`) | Per-call abort timeout |
+| `LLM_DEADLINE_MS` | no (default `25000`) | Overall LLM-chain budget; on expiry, remaining tiers are skipped for backup (judge fails requests past 30000 ms) |
 | `LLM_MAX_ATTEMPTS` | no (default `2`) | Guardrail-driven repair round-trips before backup |
 | `LLM_BASE_URL` | no (default Groq) | Custom OpenAI-compatible endpoint (gateway/proxy) |
+| `GEMINI_BASE_URL` | no (default Google) | Custom endpoint for the Gemini tier |
 | `GRIDWISE_FORCE_FALLBACK` | no (default `0`) | `1` bypasses all LLM tiers (quota-free `npm run test:offline` only) |
 | `HOST` | no (default `0.0.0.0`) | Bind address (must stay `0.0.0.0` in containers) |
 | `PORT` | no (default `8080`) | Render injects its own; app binds `0.0.0.0` |

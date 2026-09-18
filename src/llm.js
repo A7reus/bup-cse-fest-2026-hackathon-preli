@@ -27,22 +27,22 @@ const ALLOWED_TYPES = new Set([
   'no_op',
 ]);
 
-const GROQ_URL = process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1/chat/completions';
-const GEMINI_URL = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+const DEFAULT_GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const DEFAULT_GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
 const DEFAULT_GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 const TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '20000', 10);
 const MAX_ATTEMPTS = Math.max(1, parseInt(process.env.LLM_MAX_ATTEMPTS || '2', 10));
 
-/** Tier definitions, in fallback order (quotas are tracked per model). */
+/** Tier definitions, in fallback order (quotas are tracked per model). Env is read live so tests can re-point tiers per request. */
 function getProviders() {
   return {
     groq: {
-      label: 'groq', url: GROQ_URL,
+      label: 'groq', url: process.env.LLM_BASE_URL || DEFAULT_GROQ_URL,
       apiKey: process.env.GROQ_API_KEY || '', model: DEFAULT_GROQ_MODEL,
     },
     'gemini-lite': {
-      label: 'gemini-3.1-flash-lite', url: GEMINI_URL,
+      label: 'gemini-3.1-flash-lite', url: process.env.GEMINI_BASE_URL || DEFAULT_GEMINI_URL,
       apiKey: process.env.GEMINI_API_KEY || '', model: DEFAULT_GEMINI_MODEL,
     },
   };

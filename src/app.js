@@ -45,11 +45,18 @@ app.post('/optimize-energy', async (req, res) => {
   // the first tier gets one guardrail-driven repair round-trip. Only when
   // every tier errors or fails guardrails does the backup parser run.
   let interpretation = null;
-  let llmPath = 'llm';
+  let servedByLLM = true;
   const useBackup = (why) => {
     interpretation = fallbackInterpret(operator_notes, battery);
-    llmPath = why;
+    servedByLLM = false;
+    console.warn(`[backup] serving via backup parser (${why})`);
   };
+  // Overall interpretation deadline: the judge fails requests past 30s, so
+  // the whole LLM chain (tiers + repair + 429 waits) must finish well inside
+  // it. On expiry we stop calling models and use the backup parser.
+  const DEADLINE_MS = parseInt(process.env.LLM_DEADLINE_MS || '25000', 10);
+  const chainStarted = Date.now();
+  const budgetLeft = () => DEADLINE_MS - (Date.now() - chainStarted);
   const failReason = (e) => `${e.provider || 'llm'}: ${e.message}`;
   if (FORCE_FALLBACK) {
     useBackup('backup(forced-offline)');
@@ -62,6 +69,11 @@ app.post('/optimize-energy', async (req, res) => {
     } else {
       const tierIssues = [];
       for (let ti = 0; ti < chain.length && !interpretation; ti += 1) {
+        if (budgetLeft() <= 0) {
+          tierIssues.push('interpretation deadline exceeded');
+          console.warn('[chain] deadline exceeded; skipping remaining tiers');
+          break;
+        }
         const tier = chain[ti];
         const label = providers[tier].label;
         const tag = tier === 'groq' ? 'llm' : `llm:${label}`;
@@ -76,11 +88,10 @@ app.post('/optimize-energy', async (req, res) => {
         let g = guardAll(raw, operator_notes.length, battery);
         if (g.ok) {
           interpretation = g.entries;
-          llmPath = tag === 'llm' ? 'llm' : tag;
           break;
         }
-        // One repair round-trip, first tier only (bounds worst-case latency).
-        if (ti === 0 && MAX_ATTEMPTS > 1 && isRecoverable(g.reason)) {
+        // One repair round-trip, first tier only, and only inside budget.
+        if (ti === 0 && MAX_ATTEMPTS > 1 && isRecoverable(g.reason) && budgetLeft() > 0) {
           try {
             console.warn(`[${tag}] guardrail rejected (${g.reason}); asking model to repair`);
             raw = await repairWithProvider(tier, operator_notes, battery, raw, g.reason);
@@ -91,7 +102,7 @@ app.post('/optimize-energy', async (req, res) => {
           }
           if (g.ok) {
             interpretation = g.entries;
-            llmPath = tag === 'llm' ? 'llm(repaired)' : `${tag}(repaired)`;
+            console.warn(`[${tag}] repaired output accepted`);
             break;
           }
         }
@@ -125,7 +136,7 @@ app.post('/optimize-energy', async (req, res) => {
   }
 
   const totals = computeTotals(hours, plan);
-  const summary = buildSummary(interpretation, totals);
+  const summary = buildSummary(interpretation, totals, servedByLLM);
 
   return res.status(200).json({
     scenario_id,
@@ -138,7 +149,7 @@ app.post('/optimize-energy', async (req, res) => {
   });
 });
 
-function buildSummary(interpretation, totals) {
+function buildSummary(interpretation, totals, viaLLM) {
   const parts = interpretation.map((d) => {
     if (d.directive_type === 'no_op') return 'ignores an unrelated note';
     if (d.directive_type === 'solar_reduction') return `applies solar factor ${d.structured_adjustment.factor} on [${d.structured_adjustment.hours.join(',')}]`;
@@ -146,7 +157,8 @@ function buildSummary(interpretation, totals) {
     if (d.directive_type === 'max_grid_window') return `caps grid at ${d.structured_adjustment.max_grid_kwh} kWh on [${d.structured_adjustment.hours.join(',')}]`;
     return `${d.directive_type} on [${d.structured_adjustment.hours.join(',')}]`;
   });
-  return `LLM-interpreted ${interpretation.length} note(s) (${parts.join('; ')}), solved minimum-cost LP dispatch (grid ${totals.total_grid_kwh} kWh, cost BDT ${totals.total_cost_bdt}), restored end-of-day battery neutrality.`;
+  const readBy = viaLLM ? 'LLM-interpreted' : 'Interpreted (backup parser)';
+  return `${readBy} ${interpretation.length} note(s) (${parts.join('; ')}), solved minimum-cost LP dispatch (grid ${totals.total_grid_kwh} kWh, cost BDT ${totals.total_cost_bdt}), restored end-of-day battery neutrality.`;
 }
 
 /** Rejections worth one repair round-trip (fixable slips, not provider errors). */
