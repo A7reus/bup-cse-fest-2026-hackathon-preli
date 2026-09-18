@@ -1,5 +1,5 @@
 /**
- * Groq LLM interpreter for operator_notes.
+ * Groq LLM interpreter for operator_notes (+ Gemini fallback tier).
  *
  * CONTRACT (Problem Statement Sec 04/05/08):
  * - Every operator note -> exactly one directive entry, note_index order.
@@ -11,9 +11,11 @@
  *   e.g. "1 PM to 3 PM" -> [13,14]
  * - solar factor = usable fraction remaining (80% reduction -> 0.2)
  *
- * This module is the REQUIRED LLM path. It is always attempted first.
- * Rule-based fallback (src/fallback.js) is ONLY a backup when the LLM
- * fails / times out / returns invalid JSON — never the sole interpreter.
+ * CHAIN (in order): Groq gpt-oss-20b (primary) -> Gemini 3.1 Flash Lite
+ * (fallback, separate quota). The fallback tier serves only when the
+ * primary errors, times out, or fails guardrails (after one repair
+ * round-trip on the primary). Rule-based fallback (src/fallback.js) is
+ * ONLY a backup when every tier fails — never the sole interpreter.
  */
 
 const ALLOWED_TYPES = new Set([
@@ -26,9 +28,40 @@ const ALLOWED_TYPES = new Set([
 ]);
 
 const GROQ_URL = process.env.LLM_BASE_URL || 'https://api.groq.com/openai/v1/chat/completions';
-const DEFAULT_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
+const GEMINI_URL = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+const DEFAULT_GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 const TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '20000', 10);
 const MAX_ATTEMPTS = Math.max(1, parseInt(process.env.LLM_MAX_ATTEMPTS || '2', 10));
+
+/** Tier definitions, in fallback order (quotas are tracked per model). */
+function getProviders() {
+  return {
+    groq: {
+      label: 'groq', url: GROQ_URL,
+      apiKey: process.env.GROQ_API_KEY || '', model: DEFAULT_GROQ_MODEL,
+    },
+    'gemini-lite': {
+      label: 'gemini-3.1-flash-lite', url: GEMINI_URL,
+      apiKey: process.env.GEMINI_API_KEY || '', model: DEFAULT_GEMINI_MODEL,
+    },
+  };
+}
+
+/**
+ * Chain order. Default: groq -> gemini-lite.
+ * Override for isolated per-model testing, e.g. GRIDWISE_LLM_CHAIN=gemini-lite.
+ */
+function getChain() {
+  const providers = getProviders();
+  const raw = (process.env.GRIDWISE_LLM_CHAIN || 'groq,gemini-lite').split(',');
+  const chain = [];
+  for (const name of raw) {
+    const key = name.trim().toLowerCase();
+    if (providers[key] && !chain.includes(key)) chain.push(key);
+  }
+  return chain.length ? chain : ['groq', 'gemini-lite'];
+}
 
 function buildSystemPrompt(battery) {
   return `You interpret campus energy operator notes into strict JSON directives.
@@ -67,16 +100,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const REPAIR_HINT = `Your previous reply was rejected by the deterministic validator. Issues: {{ISSUES}}. Return corrected JSON only. Remember: one entry per note in order, hours ascending unique ints 0-23, end hour excluded, solar factor = fraction remaining (0-1), reserve in absolute kWh.`;
 
 /**
- * Call Groq chat completions with JSON mode.
- * Retries once on 429 honoring retry-after (free-tier TPM is 8K/min).
+ * OpenAI-compatible chat call with JSON mode.
+ * Retries once on 429 honoring retry-after (free-tier TPM caps).
  * Throws on missing key, timeout, non-200, or bad JSON.
  * `extraMessages` appends to the conversation (used for guardrail repair).
  */
-async function callGroq(notes, battery, retried = false, extraMessages = []) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    const err = new Error('GROQ_API_KEY is not set');
+async function callChat(provider, notes, battery, retried = false, extraMessages = []) {
+  if (!provider.apiKey) {
+    const err = new Error(`${provider.label}: API key is not set`);
     err.code = 'NO_API_KEY';
+    err.provider = provider.label;
     throw err;
   }
 
@@ -84,15 +117,15 @@ async function callGroq(notes, battery, retried = false, extraMessages = []) {
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const res = await fetch(GROQ_URL, {
+    const res = await fetch(provider.url, {
       method: 'POST',
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${provider.apiKey}`,
       },
       body: JSON.stringify({
-        model: DEFAULT_MODEL,
+        model: provider.model,
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
@@ -110,22 +143,24 @@ async function callGroq(notes, battery, retried = false, extraMessages = []) {
       const waitMs = Math.min(m ? parseFloat(m[1]) * 1000 : 3000, 8000);
       clearTimeout(timer);
       await sleep(waitMs);
-      return callGroq(notes, battery, true);
+      return callChat(provider, notes, battery, true, extraMessages);
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      const err = new Error(`Groq HTTP ${res.status}: ${text.slice(0, 300)}`);
-      err.code = 'GROQ_HTTP';
+      const err = new Error(`${provider.label} HTTP ${res.status}: ${text.slice(0, 300)}`);
+      err.code = 'PROVIDER_HTTP';
       err.status = res.status;
+      err.provider = provider.label;
       throw err;
     }
 
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content;
     if (!content || typeof content !== 'string') {
-      const err = new Error('Groq returned empty content');
-      err.code = 'GROQ_EMPTY';
+      const err = new Error(`${provider.label} returned empty content`);
+      err.code = 'PROVIDER_EMPTY';
+      err.provider = provider.label;
       throw err;
     }
     return content;
@@ -134,8 +169,15 @@ async function callGroq(notes, battery, retried = false, extraMessages = []) {
   }
 }
 
+// Backward-compatible Groq-only entry points (primary tier).
+async function callGroq(notes, battery, retried = false, extraMessages = []) {
+  return callChat(getProviders().groq, notes, battery, retried, extraMessages);
+}
+
 /** Extract directives array from JSON-mode object response. */
 function extractJsonArray(text) {
+  // Strip markdown fences some models add despite "no markdown" instructions.
+  const stripped = String(text).replace(/```json/gi, '').replace(/```/g, '').trim();
   // Direct parse first
   const pick = (parsed) => {
     if (Array.isArray(parsed)) return parsed;
@@ -154,47 +196,64 @@ function extractJsonArray(text) {
     throw new Error('LLM JSON is not an array');
   };
   try {
-    return pick(JSON.parse(text));
+    return pick(JSON.parse(stripped));
   } catch (e) {
     // Try to find bracketed object substring
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
+    const start = stripped.indexOf('{');
+    const end = stripped.lastIndexOf('}');
     if (start !== -1 && end !== -1 && end > start) {
-      return pick(JSON.parse(text.slice(start, end + 1)));
+      return pick(JSON.parse(stripped.slice(start, end + 1)));
     }
     throw e;
   }
 }
 
 /**
- * Primary entry: interpret notes via Groq LLM.
+ * Interpret notes via one chain tier.
  * Returns raw parsed array (unguarded — caller must run guardrails).
  */
-async function interpretWithLLM(notes, battery) {
-  const raw = await callGroq(notes, battery);
-  const arr = extractJsonArray(raw);
-  return arr;
+async function interpretWithProvider(tier, notes, battery) {
+  const provider = getProviders()[tier];
+  if (!provider) {
+    const err = new Error(`unknown LLM tier "${tier}"`);
+    err.code = 'NO_TIER';
+    throw err;
+  }
+  const raw = await callChat(provider, notes, battery);
+  return extractJsonArray(raw);
 }
 
 /**
- * Guardrail-driven repair: re-ask the model once with the validator's
- * rejection reasons. Only used for recoverable rejections (wrong count,
- * bad hours, out-of-range numerics) — never for provider errors.
- * Returns the repaired raw array (still unguarded; caller re-validates).
+ * Guardrail-driven repair on one tier: re-ask the same model with the
+ * validator's rejection reasons. Only for recoverable rejections —
+ * never for provider errors. Returns raw array; caller re-validates.
  */
-async function repairWithLLM(notes, battery, badEntries, reason) {
+async function repairWithProvider(tier, notes, battery, badEntries, reason) {
+  const provider = getProviders()[tier];
   const extra = [
     { role: 'assistant', content: JSON.stringify({ directives: badEntries }) },
     { role: 'user', content: REPAIR_HINT.replace('{{ISSUES}}', reason) },
   ];
-  const raw = await callGroq(notes, battery, false, extra);
+  const raw = await callChat(provider, notes, battery, false, extra);
   return extractJsonArray(raw);
+}
+
+/** Primary-tier (Groq) shorthands kept for compatibility. */
+async function interpretWithLLM(notes, battery) {
+  return interpretWithProvider('groq', notes, battery);
+}
+async function repairWithLLM(notes, battery, badEntries, reason) {
+  return repairWithProvider('groq', notes, battery, badEntries, reason);
 }
 
 module.exports = {
   ALLOWED_TYPES,
   interpretWithLLM,
   repairWithLLM,
+  interpretWithProvider,
+  repairWithProvider,
+  getProviders,
+  getChain,
   buildSystemPrompt,
   extractJsonArray,
   MAX_ATTEMPTS,

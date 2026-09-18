@@ -9,7 +9,11 @@ services:
     envVars:
       - key: GROQ_API_KEY
         sync: false
+      - key: GEMINI_API_KEY
+        sync: false
       - key: GROQ_MODEL
         value: openai/gpt-oss-20b
+      - key: GEMINI_MODEL
+        value: gemini-3.1-flash-lite
       - key: LLM_TIMEOUT_MS
         value: '20000'

@@ -7,12 +7,14 @@ One HTTP service that: **understands operator notes with an LLM → validates wi
 ## Architecture
 
 ```
-operator_notes ──▶ Groq LLM (openai/gpt-oss-20b, JSON mode) ──▶ guardrails ──▶ LP optimizer ──▶ replay self-check ──▶ response
-                     │ timeout │ invalid JSON │ guardrail reject │           (javascript-lp-solver       (energy balance,
-                     └──────────▶ rule-based BACKUP parser ──────┘            simplex, true optimum)      battery, directives)
+operator_notes ──▶ Groq gpt-oss-20b ──▶ Gemini 3.1 Flash Lite ──▶ LP optimizer ──▶ replay self-check ──▶ response
+   tier chain: first     (primary)          (fallback: own          (javascript-lp-solver   (energy balance,
+   guardrailed success wins                 15 RPM/500 RPD quota)   simplex, true optimum)  battery, directives)
+   + one repair round-trip on tier 1 │ timeout │ invalid JSON │ every tier fails │
+                                     └─────────▶ rule-based BACKUP parser ────────┘
 ```
 
-- **LLM role (mandatory, Problem Statement §02/§08):** `src/llm.js` converts each of the 1–3 notes into exactly one `{note_index, applies, directive_type, structured_adjustment, explanation}` entry in order. A guardrail rejection triggers **one repair round-trip** (the validator's reasons are sent back to the model) before the backup parser is used. LLM output is **untrusted** until `src/guardrails.js` passes.
+- **LLM role (mandatory, Problem Statement §02/§08):** `src/llm.js` converts each of the 1–3 notes into exactly one `{note_index, applies, directive_type, structured_adjustment, explanation}` entry in order. Tiers are tried in order — **Groq `gpt-oss-20b` → Gemini 3.1 Flash Lite** (separate quotas per provider/model) — and the first guardrailed success wins, with one repair round-trip on tier 1. LLM output is **untrusted** until `src/guardrails.js` passes. Set `GRIDWISE_LLM_CHAIN` to a single tier (e.g. `gemini-lite`) for isolated per-model testing.
 - **Guardrails:** allowed types only; `no_op ⇔ applies=false + null`; hours unique ints 0–23 ascending (numeric strings coerced); `solar factor 0..1` (a `20`-style percentage is repaired to `0.2`); reserve `0..capacity` (a leaked `0.5` fraction is scaled by capacity); grid cap `≥0`; start-inclusive/end-exclusive windows (`1 PM–3 PM → [13,14]`, `for the 14:00 hour → [14]`); factor = usable fraction remaining (`80% reduction → 0.2`, `no solar at all → 0.0`).
 - **Backup (reliability, NOT sole interpreter):** `src/fallback.js` regex/time/percentage parser runs **only** when the LLM times out, errors, or fails guardrails. The LLM is always attempted first (see logs `llm+backup`); this keeps valid-request stability and avoids crashes (Guide §05/§08).
 - **Optimizer (Optimization Quality 10 pts):** `src/optimizer.js` formulates a true linear program (minimize `Σ grid×tariff` s.t. balance, battery transitions/bounds/rates, effective solar, no-charge/discharge, reserve, grid caps, `E23 = E0`) and solves with `javascript-lp-solver` simplex — the Node equivalent of the requested PuLP+CBC optimum. Grid is recomputed from exact balance; simultaneous charge+discharge is netted; totals are rounded to 2 decimals (judge tolerance 0.01).
@@ -23,7 +25,7 @@ operator_notes ──▶ Groq LLM (openai/gpt-oss-20b, JSON mode) ──▶ guar
 | Layer | Tool | Why |
 |---|---|---|
 | Runtime/API | Node 20 + Express 4 | Team choice; exact `/health` + `/optimize-energy` contract |
-| LLM | Groq `openai/gpt-oss-20b` via REST (`GROQ_API_KEY`) | ~1 s/req (p95 ≤ 5 s), `{"directives":[...]}` JSON mode (Llama IDs are Enterprise-only — do not use), 1 retry on 429 + 1 guardrail repair round-trip; override with `GROQ_MODEL` |
+| LLM | Groq `openai/gpt-oss-20b` → Gemini 3.1 Flash Lite (`GROQ_API_KEY`, `GEMINI_API_KEY`) | ~1 s/req primary (p95 ≤ 5 s), `{"directives":[...]}` JSON mode on every tier (Llama IDs are Enterprise-only — do not use), 1 retry on 429 + 1 guardrail repair on tier 1; isolate a tier with `GRIDWISE_LLM_CHAIN` |
 | Optimizer | `javascript-lp-solver` (simplex LP) | True LP optimum in Node runtime (PuLP+CBC-equivalent; PuLP needs Python, incompatible with the chosen Node stack); 1e-6 anti-cycling penalty |
 | Config | `dotenv` | `GROQ_API_KEY` never committed; `.env.example` documents names |
 | Deploy (live) | Render free web service | `render.yaml` + health check `/health`, binds `0.0.0.0:$PORT` |
@@ -36,7 +38,7 @@ operator_notes ──▶ Groq LLM (openai/gpt-oss-20b, JSON mode) ──▶ guar
 .
 ├── src/
 │   ├── app.js          # Express entry: GET /health, POST /optimize-energy, pipeline wiring
-│   ├── llm.js          # Groq interpreter (REQUIRED primary path, {"directives":[...]} JSON mode, 429 retry + guardrail repair)
+│   ├── llm.js          # Tier chain Groq→Gemini Lite with {"directives":[...]} JSON mode, 429 retry + guardrail repair
 │   ├── guardrails.js   # Deterministic validation of LLM output (types, hours, numerics inc. %/fraction repair, applies semantics)
 │   ├── fallback.js     # Rule-based BACKUP parser (only on LLM timeout/error/guardrail-reject)
 │   ├── optimizer.js    # True LP optimum (javascript-lp-solver simplex, PuLP+CBC-equivalent)
@@ -77,8 +79,11 @@ curl -X POST http://localhost:8080/optimize-energy \
 Public-sample test (boots the API in-process; works **without** a Groq key via backup parser, with a key via LLM):
 
 ```bash
-npm test              # full path: LLM -> guardrails (+repair) -> LP -> replay
-npm run test:offline  # quota-free: GRIDWISE_FORCE_FALLBACK=1 bypasses the LLM
+npm test              # full chain: Groq -> Gemini Lite -> guardrails (+repair) -> LP -> replay
+npm run test:offline  # quota-free: GRIDWISE_FORCE_FALLBACK=1 bypasses all LLM tiers
+# isolated per-model runs (each must pass 10/10 on its own):
+GRIDWISE_LLM_CHAIN=groq npm test
+GRIDWISE_LLM_CHAIN=gemini-lite npm test
 # or: BASE_URL=https://<your-app>.onrender.com npm test
 ```
 
@@ -88,7 +93,7 @@ Expected: `10/10 samples passed` (interpretation + replay + totals). Cost ratio 
 
 ```bash
 docker build -t <dockerhub-user>/gridwise-llm:1.0.0 .
-docker run --rm -p 8080:8080 -e GROQ_API_KEY=$GROQ_API_KEY <dockerhub-user>/gridwise-llm:1.0.0
+docker run --rm -p 8080:8080 -e GROQ_API_KEY=$GROQ_API_KEY -e GEMINI_API_KEY=$GEMINI_API_KEY <dockerhub-user>/gridwise-llm:1.0.0
 curl http://localhost:8080/health
 docker push <dockerhub-user>/gridwise-llm:1.0.0
 ```
@@ -99,12 +104,15 @@ Submit the exact tag/digest + `docker run` command. Image contains no secrets (`
 
 | Name | Required | Meaning |
 |---|---|---|
-| `GROQ_API_KEY` | yes for LLM path (no for backup-tested local run) | Groq Cloud key (https://console.groq.com) |
+| `GROQ_API_KEY` | yes for tier 1 (no for backup-tested local run) | Groq Cloud key (https://console.groq.com) |
+| `GEMINI_API_KEY` | yes for tiers 2–3 | Google AI Studio key (https://aistudio.google.com); quotas are per model |
 | `GROQ_MODEL` | no (default `openai/gpt-oss-20b`) | Override if Groq retires it; any JSON-capable chat model works |
+| `GEMINI_MODEL` | no (default `gemini-3.1-flash-lite`) | 15 RPM / 250K TPM / 500 RPD tier; avoid 20-RPD Flash models for judging |
+| `GRIDWISE_LLM_CHAIN` | no (default `groq,gemini-lite`) | Tier order; single name isolates one tier for testing |
 | `LLM_TIMEOUT_MS` | no (default `20000`) | Must keep total `/optimize-energy` < 30000 ms |
 | `LLM_MAX_ATTEMPTS` | no (default `2`) | Guardrail-driven repair round-trips before backup |
 | `LLM_BASE_URL` | no (default Groq) | Custom OpenAI-compatible endpoint (gateway/proxy) |
-| `GRIDWISE_FORCE_FALLBACK` | no (default `0`) | `1` bypasses the LLM (quota-free `npm run test:offline` only) |
+| `GRIDWISE_FORCE_FALLBACK` | no (default `0`) | `1` bypasses all LLM tiers (quota-free `npm run test:offline` only) |
 | `HOST` | no (default `0.0.0.0`) | Bind address (must stay `0.0.0.0` in containers) |
 | `PORT` | no (default `8080`) | Render injects its own; app binds `0.0.0.0` |
 

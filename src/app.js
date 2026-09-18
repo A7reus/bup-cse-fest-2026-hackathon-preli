@@ -5,7 +5,7 @@
  */
 require('dotenv').config();
 const express = require('express');
-const { interpretWithLLM, repairWithLLM, MAX_ATTEMPTS } = require('./llm');
+const { interpretWithProvider, repairWithProvider, getProviders, getChain, MAX_ATTEMPTS } = require('./llm');
 const { guardAll } = require('./guardrails');
 const { fallbackInterpret } = require('./fallback');
 const { optimize } = require('./optimizer');
@@ -41,46 +41,68 @@ app.post('/optimize-energy', async (req, res) => {
   const { scenario_id, operator_notes, hours, battery } = parsed.data;
 
   // ---- 1. LLM interpretation (REQUIRED path) ----
-  // Guardrail-driven repair: a recoverable LLM rejection is re-asked once
-  // with the validator's reasons before falling back to the backup parser.
+  // Tier chain: groq -> gemini-lite. Each tier is tried in order;
+  // the first tier gets one guardrail-driven repair round-trip. Only when
+  // every tier errors or fails guardrails does the backup parser run.
   let interpretation = null;
   let llmPath = 'llm';
   const useBackup = (why) => {
     interpretation = fallbackInterpret(operator_notes, battery);
     llmPath = why;
   };
+  const failReason = (e) => `${e.provider || 'llm'}: ${e.message}`;
   if (FORCE_FALLBACK) {
     useBackup('backup(forced-offline)');
   } else {
-    try {
-      let raw = await interpretWithLLM(operator_notes, battery);
-      let g = guardAll(raw, operator_notes.length, battery);
-      if (g.ok) {
-        interpretation = g.entries;
-      } else if (MAX_ATTEMPTS > 1 && isRecoverable(g.reason)) {
+    const providers = getProviders();
+    const chain = getChain().filter((t) => providers[t] && providers[t].apiKey);
+    if (!chain.length) {
+      console.warn('[llm] no provider API key configured — using backup parser');
+      useBackup('backup(no-key)');
+    } else {
+      const tierIssues = [];
+      for (let ti = 0; ti < chain.length && !interpretation; ti += 1) {
+        const tier = chain[ti];
+        const label = providers[tier].label;
+        const tag = tier === 'groq' ? 'llm' : `llm:${label}`;
+        let raw;
         try {
-          console.warn(`[guardrail] rejected (${g.reason}); asking model to repair`);
-          raw = await repairWithLLM(operator_notes, battery, raw, g.reason);
-          g = guardAll(raw, operator_notes.length, battery);
+          raw = await interpretWithProvider(tier, operator_notes, battery);
         } catch (e) {
-          console.warn(`[repair] ${e.code || 'ERROR'}: ${e.message}`);
+          tierIssues.push(failReason(e));
+          console.warn(`[${tag}] ${e.code || 'ERROR'}: ${e.message}`);
+          continue;
         }
+        let g = guardAll(raw, operator_notes.length, battery);
         if (g.ok) {
           interpretation = g.entries;
-          llmPath = 'llm(repaired)';
-        } else {
-          console.warn(`[guardrail] repair failed (${g.reason}); using backup parser`);
-          useBackup('llm+backup');
+          llmPath = tag === 'llm' ? 'llm' : tag;
+          break;
         }
-      } else {
-        // SAFE FAILURE: invalid LLM output -> controlled backup, never invent/crash
-        console.warn(`[guardrail] LLM output rejected (${g.reason}); using backup parser`);
+        // One repair round-trip, first tier only (bounds worst-case latency).
+        if (ti === 0 && MAX_ATTEMPTS > 1 && isRecoverable(g.reason)) {
+          try {
+            console.warn(`[${tag}] guardrail rejected (${g.reason}); asking model to repair`);
+            raw = await repairWithProvider(tier, operator_notes, battery, raw, g.reason);
+            g = guardAll(raw, operator_notes.length, battery);
+          } catch (e) {
+            tierIssues.push(failReason(e));
+            console.warn(`[${tag}/repair] ${e.code || 'ERROR'}: ${e.message}`);
+          }
+          if (g.ok) {
+            interpretation = g.entries;
+            llmPath = tag === 'llm' ? 'llm(repaired)' : `${tag}(repaired)`;
+            break;
+          }
+        }
+        tierIssues.push(`${label}: guardrail rejected (${g.reason})`);
+        console.warn(`[${tag}] guardrail rejected (${g.reason}); trying next tier`);
+      }
+      if (!interpretation) {
+        // SAFE FAILURE: every tier failed -> controlled backup, never invent/crash
+        console.warn(`[chain] all tiers failed (${tierIssues.join(' | ')}); using backup parser`);
         useBackup('llm+backup');
       }
-    } catch (e) {
-      // LLM timeout / missing key / HTTP error -> backup keeps service valid
-      console.warn(`[llm] ${e.code || 'ERROR'}: ${e.message} — using backup parser`);
-      useBackup(e.code === 'NO_API_KEY' ? 'backup(no-key)' : 'backup(llm-error)');
     }
   }
 
@@ -147,7 +169,7 @@ const PORT = parseInt(process.env.PORT || '8080', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 if (require.main === module) {
   const server = app.listen(PORT, HOST, () => {
-    console.log(`GridWise LLM listening on ${HOST}:${PORT} (model=${process.env.GROQ_MODEL || 'openai/gpt-oss-20b'})`);
+    console.log(`GridWise LLM listening on ${HOST}:${PORT} (chain=${getChain().join('>')})`);
   });
   // The judge may hammer the endpoint; keep sockets from piling up.
   server.keepAliveTimeout = 65000;
