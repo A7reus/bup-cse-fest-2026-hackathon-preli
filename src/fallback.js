@@ -197,11 +197,13 @@ function parseSolarFactor(note) {
     }
   }
   if (/one[-\s]?fifth|1\/5/.test(lower)) return 0.2;
-  if (/\bhalf\b|50\s*%|one[-\s]?half/.test(lower) && /solar|output|forecast|production/.test(lower)) return 0.5;
-  if (/\bquarter\b|25\s*%/.test(lower) && /solar/.test(lower)) return 0.25;
-  if (/\bthird\b/.test(lower) && /solar|output|forecast|production/.test(lower)) return 1 / 3;
-  if (/\bfourth\b/.test(lower) && /solar|output|forecast|production/.test(lower)) return 0.25;
-  if (/\btenth\b/.test(lower) && /solar|output|forecast|production/.test(lower)) return 0.1;
+  // Fraction words count when a solar/output noun is nearby (same context set for all).
+  if (!/solar|rooftop|pv\b|panel|output|forecast|production|inverter/.test(lower)) return null;
+  if (/\bthree[-\s]?quarters?\b|3\/4/.test(lower)) return 0.75;
+  if (/\bhalf\b|50\s*%|one[-\s]?half/.test(lower)) return 0.5;
+  if (/\bquarter\b|\bfourth\b|25\s*%/.test(lower)) return 0.25;
+  if (/\bthird\b/.test(lower)) return 1 / 3;
+  if (/\btenth\b/.test(lower)) return 0.1;
   return null;
 }
 
@@ -212,7 +214,7 @@ function parseKwh(note) {
   return null;
 }
 
-/** Extract reserve: handles "50% of capacity" and "half of capacity" -> capacity-scaled. */
+/** Extract reserve: % or fraction of battery/capacity -> capacity-scaled. */
 function parseReserve(note, battery) {
   const lower = note.toLowerCase();
   const pctCap = lower.match(/(\d+(?:\.\d+)?)\s*%\s*(of\s*(the\s*)?(battery\s*)?capacity|of\s*battery)/);
@@ -220,10 +222,21 @@ function parseReserve(note, battery) {
     const p = parseFloat(pctCap[1]);
     if (Number.isFinite(p)) return (p / 100) * battery.capacity_kwh;
   }
+  // Bare "50% in the battery" / "half the battery": percent near a battery noun.
+  const pctBatt = lower.match(/(\d+(?:\.\d+)?)\s*%[^.]{0,40}\bbatter/);
+  if (pctBatt) {
+    const p = parseFloat(pctBatt[1]);
+    if (Number.isFinite(p)) return (p / 100) * battery.capacity_kwh;
+  }
   const fracCap = lower.match(/\b(half|third|quarter|fourth|fifth|tenth)\b[^.]*?\bcapacit/);
   if (fracCap) {
     const fracs = { half: 0.5, third: 1 / 3, quarter: 0.25, fourth: 0.25, fifth: 0.2, tenth: 0.1 };
     return fracs[fracCap[1]] * battery.capacity_kwh;
+  }
+  const fracBatt = lower.match(/\b(half|third|quarter|fourth|fifth|tenth)\b[^.]{0,40}\bbatter/);
+  if (fracBatt) {
+    const fracs = { half: 0.5, third: 1 / 3, quarter: 0.25, fourth: 0.25, fifth: 0.2, tenth: 0.1 };
+    return fracs[fracBatt[1]] * battery.capacity_kwh;
   }
   return parseKwh(note);
 }
@@ -231,10 +244,10 @@ function parseReserve(note, battery) {
 function detectType(note) {
   const lower = note.toLowerCase();
   const hasSolar = /solar|pv\b|photovoltaic|panel|rooftop|inverter/.test(lower);
-  const hasReduc = /reduc|drop|wash|clean|cover|cloud|inspect|output|forecast|production|usable|fraction|percent|%|half|third|fourth|fifth|tenth|quarter|offline|out of service|outage/.test(lower);
+  const hasReduc = /reduc|drop|wash|clean|cover|cloud|inspect|output|forecast|production|usable|fraction|percent|%|half|third|fourth|fifth|tenth|quarter|three[-\s]?quarter|offline|out of service|outage/.test(lower);
   if (hasSolar && hasReduc) {
     // must have some quantitative or reduction cue
-    if (/reduc|drop|%|half|third|fourth|fifth|tenth|quarter|wash|clean|cover|cloud|offline|out of service|outage/.test(lower)) return 'solar_reduction';
+    if (/reduc|drop|%|half|third|fourth|fifth|tenth|quarter|three[-\s]?quarter|wash|clean|cover|cloud|offline|out of service|outage/.test(lower)) return 'solar_reduction';
   }
   if (/keep|reserve|remain|at least|emergency|backup|stored in the battery|in the battery|no lower than|not fall below|minimum|maintain/.test(lower) && /battery|reserve|kwh|capacity|%/.test(lower)) {
     return 'minimum_battery_reserve';
@@ -242,7 +255,7 @@ function detectType(note) {
   if (/grid|feeder|transformer|substation|import|utility/.test(lower) && /exceed|cap|limit|at or below|stay at|must not exceed|below|no more than|at most|under|ceiling|\bmax\b/.test(lower)) {
     return 'max_grid_window';
   }
-  const blocked = /not\b|no\b|avoid|cannot|can't|unavailable|disabled|disconnect|isolat|offline|out of service|outage|inspect|suspend|hold off|refrain|prohibit|must not|do not|halt|paus|stopp|block|down for|restricted|inhibit/.test(lower);
+  const blocked = /not\b|no\b|avoid|cannot|can't|forbidden|banned|\bban\b|unavailable|disabled|disconnect|isolat|offline|out of service|outage|inspect|suspend|hold off|refrain|prohibit|must not|do not|halt|paus|stopp|block|down for|restricted|inhibit/.test(lower);
   if (/discharg|draw(ing)? (from|on) the batter|batter.*(supply|export)|supply .*from the batter/.test(lower) && blocked) {
     return 'no_discharge_window';
   }

@@ -78,6 +78,7 @@ Rules:
 1. Return a JSON ARRAY with EXACTLY one object per input note, in input order (if given 1 note, return 1 object; if 3 notes, return 3). Never add, merge, or split notes.
 2. Each object: {"note_index": i, "applies": bool, "directive_type": str, "structured_adjustment": obj|null, "explanation": str}
 3. Relevant note -> applies=true. Irrelevant note (cafeteria menu, library hours, registration deadlines, club notices, seminar bookings, sports office, etc.) -> applies=false, directive_type="no_op", structured_adjustment=null.
+   Status/outcome statements are no_op: "the battery will be fully charged by 6 PM" states an outcome with no prohibition, window, or kWh requirement — never convert "charged by <time>" into a no_charge_window, and never invent hours or values a note does not state.
 4. Hours are whole-hour intervals, start-inclusive end-exclusive, unique ints 0..23 ascending.
    Examples: "1 PM to 3 PM" -> [13,14]; "noon until 2 PM" -> [12,13]; "2 AM until 5 AM" -> [2,3,4]; "6 PM until 9 PM" -> [18,19,20]; "6 PM until 10 PM" -> [18,19,20,21]; "11 AM until 1 PM" -> [11,12]; "13:00 to 15:00" -> [13,14]; "11 PM until midnight" -> [23]; "for the 14:00 hour" -> [14]; "midnight" is 0, "noon" is 12.
 5. solar_reduction factor = usable fraction REMAINING (0..1). "80% reduction" -> 0.2. "drop to about 20%" -> 0.2. "roughly 25% of forecast" -> 0.25. "about half" -> 0.5. "one-fifth" -> 0.2. "no solar at all" -> 0.0.

@@ -83,11 +83,11 @@ Public-sample test (boots the API in-process; works **without** a Groq key via b
 npm test              # full chain: Groq -> Gemini Lite -> guardrails (+repair) -> LP -> replay
 npm run test:offline  # quota-free: GRIDWISE_FORCE_FALLBACK=1 bypasses all LLM tiers
 npm run test:faults   # fault injection: dead keys/endpoints, malformed input, guardrail repairs
-npm run test:adversarial  # 10 team-authored adversarial cases (midnight windows, no-invention traps, paraphrases)
+npm run test:adversarial  # 20 team-authored adversarial cases (midnight windows, no-invention traps, paraphrases)
 # isolated per-model runs (each must pass 10/10 on its own):
 GRIDWISE_LLM_CHAIN=groq npm test
 GRIDWISE_LLM_CHAIN=gemini-lite npm test
-# or: BASE_URL=https://<your-app>.onrender.com npm test
+# or: BASE_URL=https://gridwise-llm-d780.onrender.com npm test
 ```
 
 Expected: `10/10 samples passed` (interpretation + replay + totals). Cost ratio `ref/team` ≈ 1.0; team cost ≤ ref is fine (capped at 1.0 by the judge formula).
