@@ -1,0 +1,182 @@
+{
+  "_meta": {
+    "title": "GridWise — Adversarial Fine-Tuning Case Pack (team-authored)",
+    "version": "1.0",
+    "case_count": 10,
+    "description": "Ten hand-built cases targeting interpretation weak spots: trailing-midnight windows, energy-worded distractors, state-not-directive notes, 24-hour times, zero/100% factors, fraction-word reserves, and combined directives. Same schemas as the Problem Statement. Each case carries the expected machine-checkable interpretation; schedules are validated by replay (no reference costs — any valid optimal plan is accepted).",
+    "how_to_use": [
+      "node test/run-adversarial.js                (boots the API in-process)",
+      "BASE_URL=https://<deployment> node test/run-adversarial.js",
+      "GRIDWISE_FORCE_FALLBACK=1 node test/run-adversarial.js   (backup-parser path)"
+    ]
+  },
+  "base_profile_a": {
+    "demand_kwh": [95, 90, 85, 85, 90, 100, 115, 130, 145, 155, 165, 175, 180, 175, 170, 165, 175, 195, 215, 225, 215, 185, 150, 120],
+    "solar_kwh": [0, 0, 0, 0, 0, 0, 5, 15, 40, 75, 110, 145, 165, 155, 125, 80, 35, 5, 0, 0, 0, 0, 0, 0],
+    "tariff_bdt_per_kwh": [7, 6, 6, 5, 5, 6, 8, 10, 12, 14, 16, 16, 15, 14, 13, 14, 17, 21, 29, 32, 30, 20, 11, 8]
+  },
+  "cases": [
+    {
+      "id": "ADV-01",
+      "label": "Trailing-midnight charging ban",
+      "rationale": "Windows ending at midnight ('11 PM until midnight') must resolve to [23]. Tokenizers that map midnight->0 produce an end<=start window and wrongly fall back to no_op.",
+      "input": {
+        "scenario_id": "ADV-01",
+        "operator_notes": ["Do not charge the battery from 11 PM until midnight for overnight safety checks."],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "no_charge_window", "structured_adjustment": { "hours": [23] } }
+      ]
+    },
+    {
+      "id": "ADV-02",
+      "label": "Energy-worded distractor plus evening grid cap",
+      "rationale": "A note mentioning solar at noon with no operational instruction must be no_op despite energy nouns. The real cap uses 'at most' phrasing with a 'through' window.",
+      "input": {
+        "scenario_id": "ADV-02",
+        "operator_notes": [
+          "The solar eclipse viewing party is at noon on the main field.",
+          "Grid intake must stay at most 150 kWh per hour from 6 PM through 9 PM."
+        ],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 280, "initial_energy_kwh": 160, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 80, "max_discharge_kwh_per_hour": 80 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": false, "directive_type": "no_op", "structured_adjustment": null },
+        { "note_index": 1, "applies": true, "directive_type": "max_grid_window", "structured_adjustment": { "hours": [18, 19, 20], "max_grid_kwh": 150 } }
+      ]
+    },
+    {
+      "id": "ADV-03",
+      "label": "Half-cut solar in 24-hour times",
+      "rationale": "'Cut in half' carries no % sign; the window uses 24-hour clock with no meridiem. Factor must be 0.5 for hours [13,14].",
+      "input": {
+        "scenario_id": "ADV-03",
+        "operator_notes": ["Rooftop output will be cut in half between 13:00 and 15:00 due to inverter testing."],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "solar_reduction", "structured_adjustment": { "hours": [13, 14], "factor": 0.5 } }
+      ]
+    },
+    {
+      "id": "ADV-04",
+      "label": "Zero-solar outage plus fraction-word reserve plus distractor",
+      "rationale": "'Fully offline' means factor 0 (not a guess); 'a quarter of capacity' must scale by the 240 kWh capacity into 60 kWh; the library note is no_op.",
+      "input": {
+        "scenario_id": "ADV-04",
+        "operator_notes": [
+          "No solar at all from 10 AM until noon; the array will be fully offline.",
+          "Keep the battery above a quarter of capacity from 6 PM until 10 PM for night operations.",
+          "The library fine payment counter moves to room 12."
+        ],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 240, "initial_energy_kwh": 120, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 60, "max_discharge_kwh_per_hour": 60 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "solar_reduction", "structured_adjustment": { "hours": [10, 11], "factor": 0 } },
+        { "note_index": 1, "applies": true, "directive_type": "minimum_battery_reserve", "structured_adjustment": { "hours": [18, 19, 20, 21], "minimum_energy_kwh": 60 } },
+        { "note_index": 2, "applies": false, "directive_type": "no_op", "structured_adjustment": null }
+      ]
+    },
+    {
+      "id": "ADV-05",
+      "label": "Must-not-supply discharge ban",
+      "rationale": "Discharge bans paraphrased without the word 'discharge' ('must not supply load') must still map to no_discharge_window.",
+      "input": {
+        "scenario_id": "ADV-05",
+        "operator_notes": ["The battery must not supply load from 5 PM until 7 PM during relay work."],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "no_discharge_window", "structured_adjustment": { "hours": [17, 18] } }
+      ]
+    },
+    {
+      "id": "ADV-06",
+      "label": "State-not-directive note is no_op",
+      "rationale": "'Will be fully charged by 6 PM' states an outcome with no window, no value, and no prohibition. Inventing a reserve or window here would violate the no-invention guardrail.",
+      "input": {
+        "scenario_id": "ADV-06",
+        "operator_notes": ["The battery will be fully charged by 6 PM today."],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": false, "directive_type": "no_op", "structured_adjustment": null }
+      ]
+    },
+    {
+      "id": "ADV-07",
+      "label": "100% reduction plus 24-hour grid cap",
+      "rationale": "'100% reduction' leaves factor 0 (usable fraction remaining, not the loss). Cap window uses bare 24-hour times.",
+      "input": {
+        "scenario_id": "ADV-07",
+        "operator_notes": [
+          "Expect a 100% reduction in PV output from 11 AM to 2 PM.",
+          "Feeder intake capped at 170 kWh each hour between 18:00 and 21:00."
+        ],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "solar_reduction", "structured_adjustment": { "hours": [11, 12, 13], "factor": 0 } },
+        { "note_index": 1, "applies": true, "directive_type": "max_grid_window", "structured_adjustment": { "hours": [18, 19, 20], "max_grid_kwh": 170 } }
+      ]
+    },
+    {
+      "id": "ADV-08",
+      "label": "Through-window reserve with maintain wording",
+      "rationale": "'Through 10 PM' is end-exclusive at 22:00, giving [18,19,20,21]. 'Maintain' must count as a reserve verb.",
+      "input": {
+        "scenario_id": "ADV-08",
+        "operator_notes": ["Maintain at least 90 kWh in storage from 6 PM through 10 PM for the data center."],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "minimum_battery_reserve", "structured_adjustment": { "hours": [18, 19, 20, 21], "minimum_energy_kwh": 90 } }
+      ]
+    },
+    {
+      "id": "ADV-09",
+      "label": "Till-connector dawn outage plus one-tenth solar",
+      "rationale": "'Till' must work as a range connector; 'one-tenth of forecast' is factor 0.1 for [12,13].",
+      "input": {
+        "scenario_id": "ADV-09",
+        "operator_notes": [
+          "Charger outage from 2 AM till 5 AM.",
+          "Usable rooftop solar will be just one-tenth of forecast from noon to 2 PM."
+        ],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": true, "directive_type": "no_charge_window", "structured_adjustment": { "hours": [2, 3, 4] } },
+        { "note_index": 1, "applies": true, "directive_type": "solar_reduction", "structured_adjustment": { "hours": [12, 13], "factor": 0.1 } }
+      ]
+    },
+    {
+      "id": "ADV-10",
+      "label": "Double no-invention trap",
+      "rationale": "A solar noun plus a time with no stated impact ('crew arrives') and a food note with a time ('lunch at noon') must both be no_op. Guessing a 0.5 factor here is the failure mode.",
+      "input": {
+        "scenario_id": "ADV-10",
+        "operator_notes": [
+          "Panel washing crew arrives at 9 AM.",
+          "The cafeteria will serve lunch at noon."
+        ],
+        "hours": "PROFILE_A",
+        "battery": { "capacity_kwh": 230, "initial_energy_kwh": 130, "minimum_energy_kwh": 40, "max_charge_kwh_per_hour": 55, "max_discharge_kwh_per_hour": 55 }
+      },
+      "expected_interpretation": [
+        { "note_index": 0, "applies": false, "directive_type": "no_op", "structured_adjustment": null },
+        { "note_index": 1, "applies": false, "directive_type": "no_op", "structured_adjustment": null }
+      ]
+    }
+  ]
+}

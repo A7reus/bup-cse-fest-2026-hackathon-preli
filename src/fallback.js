@@ -142,7 +142,11 @@ function windowFromTokens(tokens) {
 }
 
 function parseHours(note, hintType) {
-  const tokens = extractTimeTokens(note);
+  let tokens = extractTimeTokens(note);
+  // Trailing midnight ends the day: "11 PM until midnight" -> [23], not end<=start.
+  if (tokens.length >= 2 && tokens[tokens.length - 1] === 0 && tokens[0] > 0) {
+    tokens = [...tokens.slice(0, -1), 24];
+  }
   if (tokens.length === 1) {
     // "for the 14:00 hour" / "at 3 PM" — a single-hour window is legal.
     return [tokens[0]];
