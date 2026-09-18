@@ -45,21 +45,37 @@ operator_notes ──▶ Groq gpt-oss-20b ──▶ Gemini 3.1 Flash Lite ──
 │   └── validator.js    # Request schema checks + judge-style replay + totals recomputation
 ├── test/
 │   ├── run-samples.js  # Replays all 10 public samples (interpretation + replay + totals)
+│   ├── adversarial-cases.json  # 20 team-authored edge cases (midnight, traps, paraphrases)
+│   ├── run-adversarial.js  # Harness for the adversarial pack (npm run test:adversarial)
 │   └── fault-injection.js  # Dead keys/endpoints, malformed input, guardrail repairs (npm run test:faults)
 ├── Dockerfile          # node:20-alpine fallback image, exposes 8080, no baked secrets
 ├── render.yaml         # Render free web service (build/start, /health check, env names)
 ├── package.json        # express, javascript-lp-solver, dotenv; npm start/test
-├── .env.example        # GROQ_API_KEY, GROQ_MODEL, LLM_TIMEOUT_MS/MAX_ATTEMPTS/BASE_URL, GRIDWISE_FORCE_FALLBACK, HOST/PORT (never commit .env)
+├── SCRIPT.md           # 3-minute video shooting script (tie-break preparation)
+├── .env.example        # All variable names incl. GROQ/GEMINI keys, models, chain, timeouts, HOST/PORT (never commit .env)
 └── BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json  # Organizer public samples (test fixture, not code)
 ```
 
 ## Quickstart (clean environment)
 
+Prerequisites: **Node.js ≥ 20** (`node --version`), `npm`, `curl`. No other
+runtime, database, or build tool is needed.
+
 ```bash
-npm install
-cp .env.example .env   # put your GROQ_API_KEY inside
+git clone https://github.com/A7reus/bup-cse-fest-2026-hackathon-preli
+cd bup-cse-fest-hackathon-2026-hackathon-preli/hackathon-template
+npm ci
+cp .env.example .env   # put your GROQ_API_KEY inside (optional — see below)
 npm start              # listens on 0.0.0.0:8080
 ```
+
+Notes:
+- The service runs **without any API key**: requests are then served by the
+  deterministic backup parser (same optimizer and guardrails). Add
+  `GROQ_API_KEY` (and optionally `GEMINI_API_KEY`) to `.env` for the full
+  LLM path. `.env` is git-ignored and never committed.
+- If port 8080 is taken, start with `PORT=18080 npm start` and replace
+  `8080` with `18080` in the commands below.
 
 Health:
 
@@ -68,13 +84,15 @@ curl http://localhost:8080/health
 # {"status":"ok"}
 ```
 
-Optimize (SAMPLE-02 shape):
+Optimize with a real public sample (SAMPLE-02, battery maintenance window).
+This command is copy-paste runnable — it posts all 24 hours:
 
 ```bash
-curl -X POST http://localhost:8080/optimize-energy \
-  -H 'Content-Type: application/json' \
-  -d '{"scenario_id":"SAMPLE-02","operator_notes":["The battery charger will be isolated from 2 AM until 5 AM for electrical maintenance."],"hours":[{"hour":0,"demand_kwh":100,"solar_kwh":0,"tariff_bdt_per_kwh":6}],"battery":{"capacity_kwh":200,"initial_energy_kwh":70,"minimum_energy_kwh":30,"max_charge_kwh_per_hour":55,"max_discharge_kwh_per_hour":55}}'
-# NOTE: hours must contain all 24 entries 0..23 — use the full JSON from BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json
+node -e "console.log(JSON.stringify(require('./BUP_CSE_FEST_2026_Preli_Public_Sample_Cases.json').cases[1].input))" \
+  | curl -s -X POST http://localhost:8080/optimize-energy \
+      -H 'Content-Type: application/json' -d @- \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const b=JSON.parse(s);console.log(JSON.stringify(b.directive_interpretation,null,1));console.log("cost:",b.total_cost_bdt,"grid:",b.total_grid_kwh,"peak:",b.peak_grid_kwh);})'
+# Expected interpretation: no_charge_window on [2,3,4]; cost 42885, grid 2915, peak 180.
 ```
 
 Public-sample test (boots the API in-process; works **without** a Groq key via backup parser, with a key via LLM):
@@ -91,8 +109,33 @@ GRIDWISE_LLM_CHAIN=gemini-lite npm test
 ```
 
 Expected: `10/10 samples passed` (interpretation + replay + totals). Cost ratio `ref/team` ≈ 1.0; team cost ≤ ref is fine (capped at 1.0 by the judge formula).
+Other suites print their own verdicts: `20/20 adversarial cases passed.` and
+`All fault-injection checks passed.` Live runs log per-request latency, and
+`[backup]` tags mark any request served by the backup parser instead of a model.
+
+## Deploying to Render (free plan)
+
+`render.yaml` already describes the service, so dashboard setup is minimal:
+
+1. Render Dashboard → New → Web Service → connect this repository.
+2. Build command `npm ci`, start command `npm start` (both prefilled from `render.yaml`).
+3. Environment tab: add `GROQ_API_KEY` (and `GEMINI_API_KEY`) as secret values;
+   model/timeout defaults work unchanged.
+4. Deploy, then verify **from outside your network** (phone hotspot works):
+   ```bash
+   curl https://<your-app>.onrender.com/health
+   # {"status":"ok"}
+   BASE_URL=https://<your-app>.onrender.com npm test
+   ```
+5. Free services sleep after ~15 min idle and wake slowly — ping
+   `GET /health` every ~10 minutes (e.g. UptimeRobot free monitor) through the
+   whole evaluation window so the judge never cold-starts. Re-check step 4
+   after 20+ idle minutes and confirm the first response arrives well under
+   30 s.
 
 ## Docker fallback
+
+Replace `<dockerhub-user>` with your Docker Hub username throughout:
 
 ```bash
 docker build -t <dockerhub-user>/gridwise-llm:1.0.0 .
@@ -102,13 +145,26 @@ docker push <dockerhub-user>/gridwise-llm:1.0.0
 ```
 
 Submit the exact tag/digest + `docker run` command. Image contains no secrets (`grep -r GROQ_API_KEY` finds only `process.env` reads).
+Judges verify with `docker pull`, the same `docker run` (keys injected via
+`-e`, never baked in), and `curl http://localhost:8080/health`.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `EADDRINUSE` on start | Port taken — run `PORT=18080 npm start` and use `18080` in URLs. |
+| `Backup parser: …` explanations | No model key configured, or all tiers failing — intended degraded mode; add keys to `.env` for the full LLM path. |
+| `429` / `tokens per day` errors in logs | Free-tier quota spent — wait for the daily reset, add spacing between requests, use `npm run test:offline` for iteration, or upgrade the provider tier. |
+| Slow first response on Render | Free-service cold start — set up the 10-minute `/health` ping described above. |
+| `model … does not exist` errors | Provider retired the default — set `GROQ_MODEL`/`GEMINI_MODEL` to a live ID from the provider's model list. |
+| `node` version errors | Install Node.js ≥ 20 (`node --version` to check). |
 
 ## Environment variables
 
 | Name | Required | Meaning |
 |---|---|---|
 | `GROQ_API_KEY` | yes for tier 1 (no for backup-tested local run) | Groq Cloud key (https://console.groq.com) |
-| `GEMINI_API_KEY` | yes for tiers 2–3 | Google AI Studio key (https://aistudio.google.com); quotas are per model |
+| `GEMINI_API_KEY` | yes for tier 2 | Google AI Studio key (https://aistudio.google.com); quotas are per model |
 | `GROQ_MODEL` | no (default `openai/gpt-oss-20b`) | Override if Groq retires it; any JSON-capable chat model works |
 | `GEMINI_MODEL` | no (default `gemini-3.1-flash-lite`) | 15 RPM / 250K TPM / 500 RPD tier; avoid 20-RPD Flash models for judging |
 | `GRIDWISE_LLM_CHAIN` | no (default `groq,gemini-lite`) | Tier order; single name isolates one tier for testing |
