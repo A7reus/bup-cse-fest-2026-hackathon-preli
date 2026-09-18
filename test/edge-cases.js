@@ -3,19 +3,19 @@
  *
  * Target: deployed endpoint by default, or local (in-process) if BASE_URL is
  * set to a localhost URL. To run against Render:
- *   npm run test:maruf-edge
+ *   npm run test:edge
  * or with an explicit URL:
- *   BASE_URL=https://gridwise-llm-d780.onrender.com npm run test:maruf-edge
+ *   BASE_URL=https://gridwise-llm-d780.onrender.com npm run test:edge
  *
  * To run locally (in-process, uses your local .env):
- *   BASE_URL=http://127.0.0.1:8080 npm run test:maruf-edge
+ *   BASE_URL=http://127.0.0.1:8080 npm run test:edge
  * or leave BASE_URL unset and pass RUN_LOCAL=1:
- *   RUN_LOCAL=1 npm run test:maruf-edge
+ *   RUN_LOCAL=1 npm run test:edge
  *
  * Usage:
- *   npm run test:maruf-edge                              # against Render
- *   EDGE_DELAY_MS=3000 npm run test:maruf-edge           # slower (safer for free tier)
- *   GRIDWISE_FORCE_FALLBACK=1 npm run test:maruf-edge    # skip LLM tiers (local only)
+ *   npm run test:edge                              # against Render
+ *   EDGE_DELAY_MS=3000 npm run test:edge           # slower (safer for free tier)
+ *   GRIDWISE_FORCE_FALLBACK=1 npm run test:edge    # skip LLM tiers (local only)
  */
 
 const fs = require('fs');

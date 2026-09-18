@@ -171,7 +171,7 @@ function parseHours(note, hintType) {
 function parseSolarFactor(note) {
   const lower = note.toLowerCase();
   // Zero-output wording ("no solar at all", "fully offline") -> 0.
-  if (/no solar|zero solar|completely offline|entirely offline|fully offline|total outage/.test(lower)) return 0;
+  if (/no solar|zero solar|without solar|no\s+pv\b|zero\s+pv\b|completely offline|entirely offline|fully offline|total outage/.test(lower)) return 0;
   if (/out of service/.test(lower) && /solar|pv|panel|rooftop|inverter/.test(lower)) return 0;
   const pctMatch = lower.match(/(\d+(?:\.\d+)?)\s*%/);
   if (pctMatch) {
@@ -243,13 +243,15 @@ function parseReserve(note, battery) {
 
 function detectType(note) {
   const lower = note.toLowerCase();
+  // Zero-output solar ("no/zero solar from X to Y") needs no other cue words.
+  if (/(no|zero|without)\s+(solar|pv\b|rooftop|panel)/.test(lower)) return 'solar_reduction';
   const hasSolar = /solar|pv\b|photovoltaic|panel|rooftop|inverter/.test(lower);
   const hasReduc = /reduc|drop|wash|clean|cover|cloud|inspect|output|forecast|production|usable|fraction|percent|%|half|third|fourth|fifth|tenth|quarter|three[-\s]?quarter|offline|out of service|outage/.test(lower);
   if (hasSolar && hasReduc) {
     // must have some quantitative or reduction cue
     if (/reduc|drop|%|half|third|fourth|fifth|tenth|quarter|three[-\s]?quarter|wash|clean|cover|cloud|offline|out of service|outage/.test(lower)) return 'solar_reduction';
   }
-  if (/keep|reserve|remain|at least|emergency|backup|stored in the battery|in the battery|no lower than|not fall below|minimum|maintain/.test(lower) && /battery|reserve|kwh|capacity|%/.test(lower)) {
+  if (/keep|reserve|remain|at least|stay above|kept above|held above|emergency|backup|stored in the battery|in the battery|no lower than|not fall below|minimum|maintain/.test(lower) && /battery|reserve|kwh|capacity|%/.test(lower)) {
     return 'minimum_battery_reserve';
   }
   if (/grid|feeder|transformer|substation|import|utility/.test(lower) && /exceed|cap|limit|at or below|stay at|must not exceed|below|no more than|at most|under|ceiling|\bmax\b/.test(lower)) {
